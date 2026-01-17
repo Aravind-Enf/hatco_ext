@@ -48,7 +48,12 @@ def execute(filters=None):
     columns = get_columns()
 
     if not report_type:
-        return columns, get_all_invoices(date)
+        data = []
+        data.extend(get_all_invoices(date))
+        data.extend(get_customer_receipts(date))
+        data.extend(get_supplier_payments(date))
+        data.extend(get_journal_entries(date))
+        return columns, data
 
     if report_type == "Cash Sales":
         data = get_cash_sales(date)
@@ -90,6 +95,20 @@ def execute(filters=None):
     elif report_type == "Purchase Returns":
         data = get_purchase_returns(date)
     
+    elif report_type == "Customer Receipts":
+        data = get_customer_receipts(date)
+    
+    elif report_type == "Supplier Payments":
+        data = get_supplier_payments(date)
+        
+    elif report_type in (
+		"Bank Receipts",
+		"Bank Payments",
+		"Cash Receipts",
+		"Cash Payments"
+	):
+        data = get_journal_entries(date, report_type)
+
     else:
         data = []
         
@@ -499,3 +518,76 @@ def get_all_invoices(date):
         GROUP BY pi.name
     """, {"date": date}, as_dict=True)
 
+def get_customer_receipts(date):
+    return frappe.db.sql("""
+        SELECT
+            'Payment Entry' AS document,
+            pe.name AS id,
+            'Paid' AS status,
+            pe.paid_amount AS invoice_total,
+            pe.paid_amount AS amount
+        FROM `tabPayment Entry` pe
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.parent = pe.name
+        WHERE
+            pe.docstatus = 1
+            AND pe.posting_date = %(date)s
+            AND pe.party_type = 'Customer'
+            AND per.name IS NULL
+    """, {"date": date}, as_dict=True)
+
+def get_supplier_payments(date):
+    return frappe.db.sql("""
+        SELECT
+            'Payment Entry' AS document,
+            pe.name AS id,
+            'Paid' AS status,
+            pe.paid_amount AS invoice_total,
+            pe.paid_amount AS amount
+        FROM `tabPayment Entry` pe
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.parent = pe.name
+        WHERE
+            pe.docstatus = 1
+            AND pe.posting_date = %(date)s
+            AND pe.party_type = 'Supplier'
+            AND per.name IS NULL
+    """, {"date": date}, as_dict=True)
+
+def get_journal_entries(date, report_type=None):
+    conditions = ""
+    
+    if report_type == "Bank Receipts":
+        conditions = "acc.account_type = 'Bank' AND jea.debit > 0"
+    elif report_type == "Bank Payments":
+        conditions = "acc.account_type = 'Bank' AND jea.credit > 0"
+    elif report_type == "Cash Receipts":
+        conditions = "acc.account_type = 'Cash' AND jea.debit > 0"
+    elif report_type == "Cash Payments":
+        conditions = "acc.account_type = 'Cash' AND jea.credit > 0"
+    else:
+        conditions = """
+            acc.account_type IN ('Bank', 'Cash')
+            AND (jea.debit > 0 OR jea.credit > 0)
+        """
+
+    return frappe.db.sql(f"""
+        SELECT
+            'Journal Entry' AS document,
+            je.name AS id,
+            'Posted' AS status,
+            (jea.debit + jea.credit) AS invoice_total,
+            CASE
+                WHEN jea.debit > 0 THEN jea.debit
+                ELSE jea.credit
+            END AS amount
+        FROM `tabJournal Entry` je
+        INNER JOIN `tabJournal Entry Account` jea
+            ON jea.parent = je.name
+        INNER JOIN `tabAccount` acc
+            ON acc.name = jea.account
+        WHERE
+            je.docstatus = 1
+            AND je.posting_date = %(date)s
+            AND {conditions}
+    """, {"date": date}, as_dict=True)
