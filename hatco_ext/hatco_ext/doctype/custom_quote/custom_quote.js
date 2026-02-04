@@ -26,3 +26,34 @@ frappe.ui.form.on("Custom Quote", {
     }
 });
 
+frappe.ui.form.on("Custom Quote Item", {
+
+    qty(frm, cdt, cdn) {
+        calculate_values(cdt, cdn);
+    },
+
+    rate(frm, cdt, cdn) {
+        calculate_values(cdt, cdn);
+    },
+
+    tax_rate(frm, cdt, cdn) {
+        calculate_values(cdt, cdn);
+    }
+});
+
+function calculate_values(cdt, cdn) {
+    let row = locals[cdt][cdn];
+
+    let qty = row.qty || 0;
+    let rate = row.rate || 0;
+    let tax_rate = row.tax_rate || 0;
+
+    //value automaticaly set
+    let total = qty * rate;
+    let vat = (total * tax_rate) / 100;
+    let total_incl_vat = total + vat;
+
+    frappe.model.set_value(cdt, cdn, "total", total);
+    frappe.model.set_value(cdt, cdn, "vat", vat);
+    frappe.model.set_value(cdt, cdn, "total_incl_vat", total_incl_vat);
+}
