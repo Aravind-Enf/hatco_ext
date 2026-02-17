@@ -72,56 +72,43 @@ def get_data(filters):
         "Journal Entry",
     ]
 
-    # If type filter is selected, show only that type
+    # If type filter is selected, show only that type  
     if type_filter:
         types = [type_filter]
 
     result = []
 
     for t in types:
-        conditions = ""
-        params = []
-
-        
-        if date:
-            conditions += " AND posting_date = %s"
-            params.append(date)
+        total = 0
+        count = 0
+        paid_rows = []
 
         # Voucher type conditions
         if t in ["Cash Sales", "Card Sales", "Credit Sales"]:
-            conditions += " AND voucher_type = 'Sales Invoice'"
-
+            paid_rows = fetch_sales_invoices(t, date)
+   
         elif t in ["Cash Purchases", "Card Purchases", "Credit Purchases"]:
-            conditions += " AND voucher_type = 'Purchase Invoice'"
-
+            paid_rows = fetch_purchase_invoices(t, date)
+       
         elif t == "Sales Return":
-            conditions += " AND voucher_type = 'Sales Invoice'"
-
+            paid_rows = get_sales_returns(date)
         elif t == "Purchase Return":
-            conditions += " AND voucher_type = 'Purchase Invoice'"
+            paid_rows = get_purchase_returns(date)
+        
+        elif t == "Customer Receipts":
+            paid_rows = get_customer_receipts(date)
+        elif t == "Supplier Payments":
+            paid_rows = get_supplier_payments(date)
 
-        elif t in ["Customer Receipts", "Bank Receipts", "Cash Receipts"]:
-            conditions += " AND voucher_type = 'Payment Entry'"
+       
+        elif t in ["Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments", "Journal Entry"]:
+            paid_rows = get_journal_entries(date, t)
 
-        elif t in ["Supplier Payments", "Bank Payments", "Cash Payments"]:
-            conditions += " AND voucher_type = 'Payment Entry'"
+        
+        total = sum(r.get("amount", 0) or 0 for r in paid_rows)
+        count = len(paid_rows)
 
-        elif t == "Journal Entry":
-            conditions += " AND voucher_type = 'Journal Entry'"
-
-        # Report
-        summary = frappe.db.sql(f"""
-            SELECT
-                COALESCE(SUM(debit), 0) as total,
-                COUNT(DISTINCT voucher_no) as invoice_count
-            FROM `tabGL Entry`
-            WHERE docstatus = 1
-            {conditions}
-        """, tuple(params), as_dict=True)
-
-        total = summary[0]["total"] if summary else 0
-        count = summary[0]["invoice_count"] if summary else 0
-
+        # Add total row
         result.append({
             "type": t,
             "total": total,
@@ -129,26 +116,198 @@ def get_data(filters):
             "indent": 0
         })
 
-        # Invoices
-        invoices = frappe.db.sql(f"""
-            SELECT
-                voucher_type,
-                voucher_no,
-                SUM(debit) as amount
-            FROM `tabGL Entry`
-            WHERE docstatus = 1
-            {conditions}
-            GROUP BY voucher_type, voucher_no
-        """, tuple(params), as_dict=True)
-
-        for inv in invoices:
+        # Add individual invoice/payment rows
+        for row in paid_rows:
             result.append({
-                "type": f"{inv['voucher_type']} {inv['voucher_no']}",
-                "total": inv["amount"],
+                "type": f"{row.get('voucher_type', row.get('document',''))} {row.get('voucher_no', row.get('id',''))}",
+                "total": row.get("amount", 0),
                 "invoice_count": "",
-                "indent": 1,
-                "voucher_type": inv['voucher_type'],
-                "voucher_no": inv['voucher_no']
+                "voucher_type": row.get("voucher_type", row.get("document","")),
+                "voucher_no": row.get("voucher_no", row.get("id","")),
+                "indent": 1
             })
 
     return result
+
+def fetch_sales_invoices(t, date):
+    """Fetch Sales Invoice rows per type & MoP"""
+    date_condition = f"AND si.posting_date = '{date}'" if date else ""
+
+    if t == "Cash Sales":
+        mop_condition = "mop.type = 'Cash'"
+        amount_field = "IFNULL(SUM(per.allocated_amount),0)"
+    elif t == "Card Sales":
+        mop_condition = "mop.type != 'Cash'"
+        amount_field = "IFNULL(SUM(per.allocated_amount),0)"
+    else:  # Credit Sales
+        mop_condition = None
+        amount_field = "si.grand_total"
+        date_condition += " AND si.outstanding_amount = si.grand_total"
+
+    query = f"""
+        SELECT si.name AS voucher_no,
+               si.grand_total AS invoice_total,
+               {amount_field} AS amount,
+               'Sales Invoice' AS voucher_type
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.reference_name = si.name AND per.reference_doctype='Sales Invoice'
+        LEFT JOIN `tabPayment Entry` pe
+            ON pe.name = per.parent AND pe.docstatus=1
+        {f"JOIN `tabMode of Payment` mop ON mop.name=pe.mode_of_payment" if mop_condition else ""}
+        WHERE si.docstatus=1 AND si.is_return=0
+              {f"AND {mop_condition}" if mop_condition else ""}
+              {date_condition}
+        GROUP BY si.name
+    """
+    return frappe.db.sql(query, as_dict=True)
+
+
+def fetch_purchase_invoices(t, date):
+    """Fetch Purchase Invoice rows per type & MoP"""
+    date_condition = f"AND pi.posting_date = '{date}'" if date else ""
+
+    if t == "Cash Purchases":
+        mop_condition = "mop.type = 'Cash'"
+        amount_field = "IFNULL(SUM(per.allocated_amount),0)"
+    elif t == "Card Purchases":
+        mop_condition = "mop.type != 'Cash'"
+        amount_field = "IFNULL(SUM(per.allocated_amount),0)"
+    else:  # Credit Purchases
+        mop_condition = None
+        amount_field = "pi.grand_total"
+        date_condition += " AND pi.outstanding_amount = pi.grand_total"
+
+    query = f"""
+        SELECT pi.name AS voucher_no,
+               pi.grand_total AS invoice_total,
+               {amount_field} AS amount,
+               'Purchase Invoice' AS voucher_type
+        FROM `tabPurchase Invoice` pi
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.reference_name = pi.name AND per.reference_doctype='Purchase Invoice'
+        LEFT JOIN `tabPayment Entry` pe
+            ON pe.name = per.parent AND pe.docstatus=1
+        {f"JOIN `tabMode of Payment` mop ON mop.name=pe.mode_of_payment" if mop_condition else ""}
+        WHERE pi.docstatus=1 AND pi.is_return=0
+              {f"AND {mop_condition}" if mop_condition else ""}
+              {date_condition}
+        GROUP BY pi.name
+    """
+    return frappe.db.sql(query, as_dict=True)
+
+def get_sales_returns(date):
+    return frappe.db.sql("""
+        SELECT
+            'Sales Return' AS document,
+            si.name AS id,
+            CASE
+                WHEN si.outstanding_amount = 0 THEN 'Paid'
+                WHEN si.outstanding_amount = si.grand_total THEN 'Unpaid'
+                ELSE 'Partially Paid'
+            END AS status,
+            si.grand_total AS invoice_total,
+            IFNULL(SUM(
+                CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 THEN per.allocated_amount ELSE 0 END
+            ),0) AS amount
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.reference_name=si.name AND per.reference_doctype='Sales Invoice'
+        LEFT JOIN `tabPayment Entry` pe
+            ON pe.name = per.parent
+        WHERE si.docstatus=1 AND si.is_return=1
+              AND (si.posting_date = %(date)s OR pe.posting_date = %(date)s)
+        GROUP BY si.name
+    """, {"date": date}, as_dict=True)
+
+
+def get_purchase_returns(date):
+    return frappe.db.sql("""
+        SELECT
+            'Purchase Return' AS document,
+            pi.name AS id,
+            CASE
+                WHEN pi.outstanding_amount = 0 THEN 'Paid'
+                WHEN pi.outstanding_amount = pi.grand_total THEN 'Unpaid'
+                ELSE 'Partially Paid'
+            END AS status,
+            pi.grand_total AS invoice_total,
+            IFNULL(SUM(
+                CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 THEN per.allocated_amount ELSE 0 END
+            ),0) AS amount
+        FROM `tabPurchase Invoice` pi
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.reference_name=pi.name AND per.reference_doctype='Purchase Invoice'
+        LEFT JOIN `tabPayment Entry` pe
+            ON pe.name = per.parent
+        WHERE pi.docstatus=1 AND pi.is_return=1
+              AND (pi.posting_date = %(date)s OR pe.posting_date = %(date)s)
+        GROUP BY pi.name
+    """, {"date": date}, as_dict=True)
+
+
+def get_customer_receipts(date):
+    return frappe.db.sql("""
+        SELECT
+            'Payment Entry' AS document,
+            pe.name AS id,
+            'Paid' AS status,
+            pe.paid_amount AS invoice_total,
+            pe.paid_amount AS amount
+        FROM `tabPayment Entry` pe
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.parent=pe.name
+        WHERE pe.docstatus=1
+              AND pe.posting_date=%(date)s
+              AND pe.party_type='Customer'
+              AND per.name IS NULL
+    """, {"date": date}, as_dict=True)
+
+
+def get_supplier_payments(date):
+    return frappe.db.sql("""
+        SELECT
+            'Payment Entry' AS document,
+            pe.name AS id,
+            'Paid' AS status,
+            pe.paid_amount AS invoice_total,
+            pe.paid_amount AS amount
+        FROM `tabPayment Entry` pe
+        LEFT JOIN `tabPayment Entry Reference` per
+            ON per.parent=pe.name
+        WHERE pe.docstatus=1
+              AND pe.posting_date=%(date)s
+              AND pe.party_type='Supplier'
+              AND per.name IS NULL
+    """, {"date": date}, as_dict=True)
+
+def get_journal_entries(date, report_type=None):
+    conditions = ""
+    
+    if report_type == "Bank Receipts":
+        conditions = "acc.account_type='Bank' AND jea.debit>0"
+    elif report_type == "Bank Payments":
+        conditions = "acc.account_type='Bank' AND jea.credit>0"
+    elif report_type == "Cash Receipts":
+        conditions = "acc.account_type='Cash' AND jea.debit>0"
+    elif report_type == "Cash Payments":
+        conditions = "acc.account_type='Cash' AND jea.credit>0"
+    else:
+        conditions = "acc.account_type IN ('Bank','Cash') AND (jea.debit>0 OR jea.credit>0)"
+
+    return frappe.db.sql(f"""
+        SELECT
+            'Journal Entry' AS document,
+            je.name AS id,
+            'Posted' AS status,
+            (jea.debit+jea.credit) AS invoice_total,
+            CASE WHEN jea.debit>0 THEN jea.debit ELSE jea.credit END AS amount
+        FROM `tabJournal Entry` je
+        INNER JOIN `tabJournal Entry Account` jea
+            ON jea.parent=je.name
+        INNER JOIN `tabAccount` acc
+            ON acc.name=jea.account
+        WHERE je.docstatus=1
+              AND je.posting_date=%(date)s
+              AND {conditions}
+    """, {"date": date}, as_dict=True)
