@@ -17,6 +17,12 @@ frappe.query_reports["DCR Report"] = {
             "fieldtype": "Select",
             "options": "\nCash Sales\nCard Sales\nCredit Sales\nCash Purchases\nCard Purchases\nCredit Purchases\nSales Return\nPurchase Return\nCustomer Receipts\nSupplier Payments\nBank Receipts\nBank Payments\nCash Receipts\nCash Payments\nJournal Entry",
             "reqd": 0 
+        },
+        {
+            "fieldname": "cost_center",
+            "label": "Cost Center",
+            "fieldtype": "Link",
+            "options": "Cost Center"
         }
     ],
     

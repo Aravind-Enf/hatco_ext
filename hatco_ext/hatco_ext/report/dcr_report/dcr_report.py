@@ -53,6 +53,7 @@ def get_data(filters):
     filters = filters or {}
     date = filters.get("date")
     type_filter = filters.get("type")
+    cost_center = filters.get("cost_center")  
 
     types = [
         "Cash Sales",
@@ -85,24 +86,24 @@ def get_data(filters):
 
         # Voucher type conditions
         if t in ["Cash Sales", "Card Sales", "Credit Sales"]:
-            paid_rows = fetch_sales_invoices(t, date)
+            paid_rows = fetch_sales_invoices(t, date, cost_center)
    
         elif t in ["Cash Purchases", "Card Purchases", "Credit Purchases"]:
-            paid_rows = fetch_purchase_invoices(t, date)
+            paid_rows = fetch_purchase_invoices(t, date, cost_center)
        
         elif t == "Sales Return":
-            paid_rows = get_sales_returns(date)
+            paid_rows = get_sales_returns(date, cost_center)
         elif t == "Purchase Return":
-            paid_rows = get_purchase_returns(date)
+            paid_rows = get_purchase_returns(date, cost_center)
         
         elif t == "Customer Receipts":
-            paid_rows = get_customer_receipts(date)
+            paid_rows = get_customer_receipts(date, cost_center)
         elif t == "Supplier Payments":
-            paid_rows = get_supplier_payments(date)
+            paid_rows = get_supplier_payments(date, cost_center)
 
        
         elif t in ["Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments", "Journal Entry"]:
-            paid_rows = get_journal_entries(date, t)
+            paid_rows = get_journal_entries(date, t, cost_center)
 
         
         total = sum(r.get("amount", 0) or 0 for r in paid_rows)
@@ -129,7 +130,8 @@ def get_data(filters):
 
     return result
 
-def fetch_sales_invoices(t, date):
+
+def fetch_sales_invoices(t, date, cost_center):
     """Fetch Sales Invoice rows per type & MoP"""
     date_condition = f"AND si.posting_date = '{date}'" if date else ""
 
@@ -158,12 +160,13 @@ def fetch_sales_invoices(t, date):
         WHERE si.docstatus=1 AND si.is_return=0
               {f"AND {mop_condition}" if mop_condition else ""}
               {date_condition}
+              AND (%(cost_center)s IS NULL OR si.cost_center = %(cost_center)s)
         GROUP BY si.name
     """
-    return frappe.db.sql(query, as_dict=True)
+    return frappe.db.sql(query, {"date": date, "cost_center": cost_center}, as_dict=True)
 
 
-def fetch_purchase_invoices(t, date):
+def fetch_purchase_invoices(t, date, cost_center):
     """Fetch Purchase Invoice rows per type & MoP"""
     date_condition = f"AND pi.posting_date = '{date}'" if date else ""
 
@@ -192,11 +195,13 @@ def fetch_purchase_invoices(t, date):
         WHERE pi.docstatus=1 AND pi.is_return=0
               {f"AND {mop_condition}" if mop_condition else ""}
               {date_condition}
+              AND (%(cost_center)s IS NULL OR pi.cost_center = %(cost_center)s)
         GROUP BY pi.name
     """
-    return frappe.db.sql(query, as_dict=True)
+    return frappe.db.sql(query, {"date": date, "cost_center": cost_center}, as_dict=True)
 
-def get_sales_returns(date):
+
+def get_sales_returns(date, cost_center):
     return frappe.db.sql("""
         SELECT
             'Sales Return' AS document,
@@ -217,11 +222,12 @@ def get_sales_returns(date):
             ON pe.name = per.parent
         WHERE si.docstatus=1 AND si.is_return=1
               AND (si.posting_date = %(date)s OR pe.posting_date = %(date)s)
+              AND (%(cost_center)s IS NULL OR si.cost_center = %(cost_center)s)
         GROUP BY si.name
-    """, {"date": date}, as_dict=True)
+    """, {"date": date, "cost_center": cost_center}, as_dict=True)
 
 
-def get_purchase_returns(date):
+def get_purchase_returns(date, cost_center):
     return frappe.db.sql("""
         SELECT
             'Purchase Return' AS document,
@@ -242,11 +248,12 @@ def get_purchase_returns(date):
             ON pe.name = per.parent
         WHERE pi.docstatus=1 AND pi.is_return=1
               AND (pi.posting_date = %(date)s OR pe.posting_date = %(date)s)
+              AND (%(cost_center)s IS NULL OR pi.cost_center = %(cost_center)s)
         GROUP BY pi.name
-    """, {"date": date}, as_dict=True)
+    """, {"date": date, "cost_center": cost_center}, as_dict=True)
 
 
-def get_customer_receipts(date):
+def get_customer_receipts(date, cost_center):
     return frappe.db.sql("""
         SELECT
             'Payment Entry' AS document,
@@ -261,10 +268,11 @@ def get_customer_receipts(date):
               AND pe.posting_date=%(date)s
               AND pe.party_type='Customer'
               AND per.name IS NULL
-    """, {"date": date}, as_dict=True)
+              AND (%(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s)
+    """, {"date": date, "cost_center": cost_center}, as_dict=True)
 
 
-def get_supplier_payments(date):
+def get_supplier_payments(date, cost_center):
     return frappe.db.sql("""
         SELECT
             'Payment Entry' AS document,
@@ -279,9 +287,11 @@ def get_supplier_payments(date):
               AND pe.posting_date=%(date)s
               AND pe.party_type='Supplier'
               AND per.name IS NULL
-    """, {"date": date}, as_dict=True)
+              AND (%(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s)
+    """, {"date": date, "cost_center": cost_center}, as_dict=True)
 
-def get_journal_entries(date, report_type=None):
+
+def get_journal_entries(date, report_type=None, cost_center=None):
     conditions = ""
     
     if report_type == "Bank Receipts":
@@ -310,4 +320,5 @@ def get_journal_entries(date, report_type=None):
         WHERE je.docstatus=1
               AND je.posting_date=%(date)s
               AND {conditions}
-    """, {"date": date}, as_dict=True)
+              AND (%(cost_center)s IS NULL OR jea.cost_center = %(cost_center)s)
+    """, {"date": date, "cost_center": cost_center}, as_dict=True)
