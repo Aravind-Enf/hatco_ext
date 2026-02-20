@@ -1,3 +1,4 @@
+
 # Copyright (c) 2026, Aravind R and contributors
 # For license information, please see license.txt
 
@@ -51,6 +52,11 @@ def get_columns():
 
 def get_data(filters):
     filters = filters or {}
+    
+
+    filters["company"] = filters.get("company") if filters.get("company") else None
+    filters["cost_center"] = filters.get("cost_center") if filters.get("cost_center") else None
+
     date = filters.get("date")
     type_filter = filters.get("type")
     cost_center = filters.get("cost_center")
@@ -88,25 +94,25 @@ def get_data(filters):
         # Voucher type conditions
         if t in ["Cash Sales", "Card/Bank Sales", "Credit Sales"]:
             paid_rows = fetch_sales_invoices(t, date, company,cost_center)
-   
+
         elif t in ["Cash Purchases", "Card/Bank Purchases", "Credit Purchases"]:
             paid_rows = fetch_purchase_invoices(t, date, company,cost_center)
-       
+
         elif t == "Sales Return":
             paid_rows = get_sales_returns(date,company, cost_center)
         elif t == "Purchase Return":
             paid_rows = get_purchase_returns(date,company, cost_center)
-        
+
         elif t == "Customer Receipts":
             paid_rows = get_customer_receipts(date, company,cost_center)
         elif t == "Supplier Payments":
             paid_rows = get_supplier_payments(date, company,cost_center)
 
-       
+
         elif t in ["Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments", "Journal Entry"]:
             paid_rows = get_journal_entries(date, t, company,cost_center)
 
-        
+
         total = sum(r.get("amount", 0) or 0 for r in paid_rows)
         count = len(paid_rows)
 
@@ -150,7 +156,7 @@ def fetch_sales_invoices(t, date,company, cost_center):
             AND (
                 (
                     si.is_pos = 0
-                    AND pe.posting_date = %(date)s
+                    AND pe.posting_date <= si.posting_date
                     AND pe.mode_of_payment IN (
                         SELECT name FROM `tabMode of Payment`
                         WHERE type = 'Cash'
@@ -217,7 +223,7 @@ def fetch_sales_invoices(t, date,company, cost_center):
                 WHERE per2.reference_name = si.name
                     AND per2.reference_doctype = 'Sales Invoice'
                     AND pe2.docstatus = 1
-                    AND pe2.posting_date = %(date)s
+                    
             )
         """
 
@@ -229,24 +235,20 @@ def fetch_sales_invoices(t, date,company, cost_center):
                {amount_field} AS amount,
                'Sales Invoice' AS voucher_type
         FROM `tabSales Invoice` si
-
         {join_type} JOIN `tabPayment Entry Reference` per
             ON per.reference_name = si.name
             AND per.reference_doctype='Sales Invoice'
-
         {join_type} JOIN `tabPayment Entry` pe
             ON pe.name = per.parent
             AND pe.docstatus=1
             
          LEFT JOIN `tabSales Invoice Payment` sip
             ON sip.parent = si.name
-
         WHERE si.docstatus=1
               AND si.is_return=0
               {date_condition}
-              AND (%(company)s IS NULL OR si.company = %(company)s)
-              AND (%(cost_center)s IS NULL OR si.cost_center = %(cost_center)s)
-
+              AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
+              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR si.cost_center = %(cost_center)s )
         GROUP BY si.name
     """
 
@@ -306,8 +308,8 @@ def fetch_purchase_invoices(t, date,company, cost_center):
         WHERE pi.docstatus=1
               AND pi.is_return=0
               {date_condition}
-              AND (%(company)s IS NULL OR pi.company = %(company)s)
-              AND (%(cost_center)s IS NULL OR pi.cost_center = %(cost_center)s)
+              AND ( %(company)s IS NULL OR %(company)s = '' OR pi.company = %(company)s )
+              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pi.cost_center = %(cost_center)s )
         GROUP BY pi.name
     """
 
@@ -344,8 +346,8 @@ def get_sales_returns(date,company,cost_center):
         WHERE si.docstatus=1 
               AND si.is_return=1
               AND si.posting_date = %(date)s
-              AND (%(company)s IS NULL OR si.company = %(company)s)
-              AND (%(cost_center)s IS NULL OR si.cost_center = %(cost_center)s)
+              AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
+              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR si.cost_center = %(cost_center)s )
         GROUP BY si.name, si.grand_total
         ORDER BY si.posting_date ASC
     """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
@@ -375,14 +377,14 @@ def get_purchase_returns(date,company,cost_center):
             ON pe.name = per.parent
         WHERE pi.docstatus=1 AND pi.is_return=1
               AND pi.posting_date = %(date)s
-              AND (%(company)s IS NULL OR pi.company = %(company)s)
-              AND (%(cost_center)s IS NULL OR pi.cost_center = %(cost_center)s)
+              AND ( %(company)s IS NULL OR %(company)s = '' OR pi.company = %(company)s )
+              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pi.cost_center = %(cost_center)s )
         GROUP BY pi.name
         ORDER BY pi.posting_date ASC
     """, {"date": date,"company": company, "cost_center": cost_center}, as_dict=True)
 
 
-def get_customer_receipts(date, company,cost_center):
+def get_customer_receipts(date, company=None, cost_center=None):
     return frappe.db.sql("""
         SELECT
             'Payment Entry' AS document,
@@ -391,21 +393,22 @@ def get_customer_receipts(date, company,cost_center):
             pe.paid_amount AS invoice_total,
             pe.paid_amount AS amount
         FROM `tabPayment Entry` pe
-        LEFT JOIN `tabPayment Entry Reference` per
+        INNER JOIN `tabPayment Entry Reference` per
             ON per.parent = pe.name
             AND per.reference_doctype = 'Sales Invoice'
-        LEFT JOIN `tabSales Invoice` si
+        INNER JOIN `tabSales Invoice` si
             ON si.name = per.reference_name
         WHERE pe.docstatus = 1
               AND pe.posting_date = %(date)s
               AND pe.party_type = 'Customer'
-              AND (%(company)s IS NULL OR pe.company = %(company)s)
-              AND (
-                    per.name IS NULL 
-                    OR si.posting_date < pe.posting_date
-                  )
-              AND (%(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s)
-    """, {"date": date,  "company": company,"cost_center": cost_center}, as_dict=True)
+               AND pe.posting_date != si.posting_date
+              AND ( %(company)s IS NULL OR %(company)s = '' OR pe.company = %(company)s )
+              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pe.cost_center = %(cost_center)s )
+    """, {
+        "date": date,
+        "company": company,
+        "cost_center": cost_center
+    }, as_dict=True)
 
 
 def get_supplier_payments(date, company,cost_center):
@@ -425,13 +428,13 @@ def get_supplier_payments(date, company,cost_center):
         WHERE pe.docstatus = 1
               AND pe.posting_date = %(date)s
               AND pe.party_type = 'Supplier'
-              AND (%(company)s IS NULL OR pe.company = %(company)s)
+              AND ( %(company)s IS NULL OR %(company)s = '' OR pe.company = %(company)s )
               AND (
                     per.name IS NULL 
                     OR pi.posting_date < pe.posting_date
                   )
-              AND (%(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s)
-    """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
+              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pe.cost_center = %(cost_center)s )
+    """, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
 
 
 def get_journal_entries(date, report_type=None, company=None, cost_center=None):
