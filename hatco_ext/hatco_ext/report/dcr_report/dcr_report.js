@@ -19,11 +19,26 @@ frappe.query_reports["DCR Report"] = {
             "reqd": 0 
         },
         {
+            "fieldname": "company",
+            "label": "Company",
+            "fieldtype": "Link",
+            "options": "Company",
+            "reqd": 0
+        },
+        {
             "fieldname": "cost_center",
             "label": "Cost Center",
             "fieldtype": "Link",
-            "options": "Cost Center"
-        }
+            "options": "Cost Center",
+            "get_query": function() {
+                var company = frappe.query_report.get_filter_value("company");
+                return {
+                    "filters": {
+                        "company": company
+                    }
+                };
+            }
+       }
     ],
     
     // Types into a clickable link

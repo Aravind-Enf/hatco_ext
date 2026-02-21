@@ -53,7 +53,8 @@ def get_data(filters):
     filters = filters or {}
     date = filters.get("date")
     type_filter = filters.get("type")
-    cost_center = filters.get("cost_center")  
+    cost_center = filters.get("cost_center")
+    company = filters.get("company")  
 
     types = [
         "Cash Sales",
@@ -86,24 +87,24 @@ def get_data(filters):
 
         # Voucher type conditions
         if t in ["Cash Sales", "Card/Bank Sales", "Credit Sales"]:
-            paid_rows = fetch_sales_invoices(t, date, cost_center)
+            paid_rows = fetch_sales_invoices(t, date, company,cost_center)
    
         elif t in ["Cash Purchases", "Card/Bank Purchases", "Credit Purchases"]:
-            paid_rows = fetch_purchase_invoices(t, date, cost_center)
+            paid_rows = fetch_purchase_invoices(t, date, company,cost_center)
        
         elif t == "Sales Return":
-            paid_rows = get_sales_returns(date, cost_center)
+            paid_rows = get_sales_returns(date,company, cost_center)
         elif t == "Purchase Return":
-            paid_rows = get_purchase_returns(date, cost_center)
+            paid_rows = get_purchase_returns(date,company, cost_center)
         
         elif t == "Customer Receipts":
-            paid_rows = get_customer_receipts(date, cost_center)
+            paid_rows = get_customer_receipts(date, company,cost_center)
         elif t == "Supplier Payments":
-            paid_rows = get_supplier_payments(date, cost_center)
+            paid_rows = get_supplier_payments(date, company,cost_center)
 
        
         elif t in ["Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments", "Journal Entry"]:
-            paid_rows = get_journal_entries(date, t, cost_center)
+            paid_rows = get_journal_entries(date, t, company,cost_center)
 
         
         total = sum(r.get("amount", 0) or 0 for r in paid_rows)
@@ -131,87 +132,165 @@ def get_data(filters):
     return result
 
 
-def fetch_sales_invoices(t, date, cost_center):
-    """Fetch Sales Invoice rows per type & MoP"""
-
-    date_condition = f"AND si.posting_date = '{date}'" if date else ""
+def fetch_sales_invoices(t, date,company, cost_center):
 
     if t == "Cash Sales":
-        mop_condition = None
-        amount_field = "IFNULL(SUM(per.allocated_amount),0)"
-        date_condition += " AND pe.posting_date = %(date)s"
 
-    elif t == "Card Sales":
-        mop_condition = None
-        amount_field = "IFNULL(SUM(per.allocated_amount),0)"
-        date_condition += " AND pe.posting_date = %(date)s"
+        amount_field = """
+            IFNULL(
+                CASE 
+                    WHEN si.is_pos = 1 THEN SUM(sip.amount)
+                    ELSE SUM(per.allocated_amount)
+                END
+            ,0)
+        """
 
-    else:  # Credit Sales
-        mop_condition = None
-        amount_field = "si.grand_total"
-        date_condition += """
+        date_condition = """
+            AND si.posting_date = %(date)s
             AND (
-                si.outstanding_amount = si.grand_total
-                OR NOT EXISTS (
-                    SELECT 1 FROM `tabPayment Entry Reference` per2
-                    INNER JOIN `tabPayment Entry` pe2
-                        ON pe2.name = per2.parent
-                    WHERE per2.reference_name = si.name
-                        AND per2.reference_doctype='Sales Invoice'
-                        AND pe2.docstatus=1
-                        AND pe2.posting_date = %(date)s
+                (
+                    si.is_pos = 0
+                    AND pe.posting_date = %(date)s
+                    AND pe.mode_of_payment IN (
+                        SELECT name FROM `tabMode of Payment`
+                        WHERE type = 'Cash'
+                    )
+                )
+                OR
+                (
+                    si.is_pos = 1
+                    AND sip.mode_of_payment IN (
+                        SELECT name FROM `tabMode of Payment`
+                        WHERE type = 'Cash'
+                    )
                 )
             )
         """
+
+        join_type = "LEFT"
+
+    elif t == "Card/Bank Sales":
+
+        amount_field = """
+            IFNULL(
+                CASE 
+                    WHEN si.is_pos = 1 THEN SUM(sip.amount)
+                    ELSE SUM(per.allocated_amount)
+                END
+            ,0)
+        """
+
+        date_condition = """
+            AND si.posting_date = %(date)s
+            AND (
+                (
+                    si.is_pos = 0
+                    AND pe.posting_date = %(date)s
+                    AND pe.mode_of_payment IN (
+                        SELECT name FROM `tabMode of Payment`
+                        WHERE type IN ('Bank','Card')
+                    )
+                )
+                OR
+                (
+                    si.is_pos = 1
+                    AND sip.mode_of_payment IN (
+                        SELECT name FROM `tabMode of Payment`
+                        WHERE type IN ('Bank','Card')
+                    )
+                )
+            )
+        """
+
+        join_type = "LEFT"
+
+    else:  # Credit Sales
+        amount_field = "si.grand_total"
+        date_condition = """
+            AND si.posting_date = %(date)s
+            AND si.is_pos = 0
+            AND NOT EXISTS (
+                SELECT 1
+                FROM `tabPayment Entry Reference` per2
+                INNER JOIN `tabPayment Entry` pe2
+                    ON pe2.name = per2.parent
+                WHERE per2.reference_name = si.name
+                    AND per2.reference_doctype = 'Sales Invoice'
+                    AND pe2.docstatus = 1
+                    AND pe2.posting_date = %(date)s
+            )
+        """
+
+        join_type = "LEFT"
+
 
     query = f"""
         SELECT si.name AS voucher_no,
                {amount_field} AS amount,
                'Sales Invoice' AS voucher_type
         FROM `tabSales Invoice` si
-        LEFT JOIN `tabPayment Entry Reference` per
-            ON per.reference_name = si.name AND per.reference_doctype='Sales Invoice'
-        LEFT JOIN `tabPayment Entry` pe
-            ON pe.name = per.parent AND pe.docstatus=1
+
+        {join_type} JOIN `tabPayment Entry Reference` per
+            ON per.reference_name = si.name
+            AND per.reference_doctype='Sales Invoice'
+
+        {join_type} JOIN `tabPayment Entry` pe
+            ON pe.name = per.parent
+            AND pe.docstatus=1
+            
+         LEFT JOIN `tabSales Invoice Payment` sip
+            ON sip.parent = si.name
+
         WHERE si.docstatus=1
               AND si.is_return=0
               {date_condition}
+              AND (%(company)s IS NULL OR si.company = %(company)s)
               AND (%(cost_center)s IS NULL OR si.cost_center = %(cost_center)s)
+
         GROUP BY si.name
     """
-    return frappe.db.sql(query, {"date": date, "cost_center": cost_center}, as_dict=True)
+
+    return frappe.db.sql(query, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
 
 
-def fetch_purchase_invoices(t, date, cost_center):
+def fetch_purchase_invoices(t, date,company, cost_center):
     """Fetch Purchase Invoice rows per type & MoP"""
 
     date_condition = f"AND pi.posting_date = '{date}'" if date else ""
 
     if t == "Cash Purchases":
-        mop_condition = None
         amount_field = "IFNULL(SUM(per.allocated_amount),0)"
-        date_condition += " AND pe.posting_date = %(date)s"
+        date_condition = """
+            AND pi.posting_date = %(date)s
+            AND pe.posting_date = %(date)s
+            AND pe.mode_of_payment IN (
+                SELECT name FROM `tabMode of Payment` WHERE type='Cash'
+            )
+        """
 
-    elif t == "Card Purchases":
-        mop_condition = None
+    elif t == "Card/Bank Purchases":
         amount_field = "IFNULL(SUM(per.allocated_amount),0)"
-        date_condition += " AND pe.posting_date = %(date)s"
+        date_condition = """
+            AND pi.posting_date = %(date)s
+            AND pe.posting_date = %(date)s
+            AND pe.mode_of_payment IN (
+                SELECT name FROM `tabMode of Payment` WHERE type IN ('Bank','Card')
+            )
+        """
 
     else:  # Credit Purchases
-        mop_condition = None
         amount_field = "pi.grand_total"
-        date_condition += """
-            AND (
-                pi.outstanding_amount = pi.grand_total
-                OR NOT EXISTS (
-                    SELECT 1 FROM `tabPayment Entry Reference` per2
-                    INNER JOIN `tabPayment Entry` pe2
-                        ON pe2.name = per2.parent
-                    WHERE per2.reference_name = pi.name
-                        AND per2.reference_doctype='Purchase Invoice'
-                        AND pe2.docstatus=1
-                        AND pe2.posting_date = %(date)s
-                )
+        date_condition = """
+            AND pi.posting_date = %(date)s
+            AND NOT EXISTS (
+                SELECT 1
+                FROM `tabPayment Entry Reference` per2
+                INNER JOIN `tabPayment Entry` pe2
+                    ON pe2.name = per2.parent
+                WHERE per2.reference_name = pi.name
+                    AND per2.reference_doctype = 'Purchase Invoice'
+                    AND pe2.docstatus = 1
+                    AND pe2.posting_date = %(date)s
             )
         """
 
@@ -227,14 +306,15 @@ def fetch_purchase_invoices(t, date, cost_center):
         WHERE pi.docstatus=1
               AND pi.is_return=0
               {date_condition}
+              AND (%(company)s IS NULL OR pi.company = %(company)s)
               AND (%(cost_center)s IS NULL OR pi.cost_center = %(cost_center)s)
         GROUP BY pi.name
     """
 
-    return frappe.db.sql(query, {"date": date, "cost_center": cost_center}, as_dict=True)
+    return frappe.db.sql(query, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
 
 
-def get_sales_returns(date, cost_center):
+def get_sales_returns(date,company,cost_center):
     # Fetch sales returns for the exact filter date only
     data = frappe.db.sql("""
         SELECT
@@ -264,16 +344,17 @@ def get_sales_returns(date, cost_center):
         WHERE si.docstatus=1 
               AND si.is_return=1
               AND si.posting_date = %(date)s
+              AND (%(company)s IS NULL OR si.company = %(company)s)
               AND (%(cost_center)s IS NULL OR si.cost_center = %(cost_center)s)
         GROUP BY si.name, si.grand_total
         ORDER BY si.posting_date ASC
-    """, {"date": date, "cost_center": cost_center}, as_dict=True)
+    """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
 
     return data
 
 
-def get_purchase_returns(date, cost_center):
-    # Fetch purchase returns for the exact invoice posting date only (like Sales Returns)
+def get_purchase_returns(date,company,cost_center):
+    # Fetch purchase returns for the exact invoice posting date only 
     return frappe.db.sql("""
         SELECT
             'Purchase Return' AS document,
@@ -294,13 +375,14 @@ def get_purchase_returns(date, cost_center):
             ON pe.name = per.parent
         WHERE pi.docstatus=1 AND pi.is_return=1
               AND pi.posting_date = %(date)s
+              AND (%(company)s IS NULL OR pi.company = %(company)s)
               AND (%(cost_center)s IS NULL OR pi.cost_center = %(cost_center)s)
         GROUP BY pi.name
         ORDER BY pi.posting_date ASC
-    """, {"date": date, "cost_center": cost_center}, as_dict=True)
+    """, {"date": date,"company": company, "cost_center": cost_center}, as_dict=True)
 
 
-def get_customer_receipts(date, cost_center):
+def get_customer_receipts(date, company,cost_center):
     return frappe.db.sql("""
         SELECT
             'Payment Entry' AS document,
@@ -317,15 +399,16 @@ def get_customer_receipts(date, cost_center):
         WHERE pe.docstatus = 1
               AND pe.posting_date = %(date)s
               AND pe.party_type = 'Customer'
+              AND (%(company)s IS NULL OR pe.company = %(company)s)
               AND (
-                    per.name IS NULL
-                    OR si.posting_date <= pe.posting_date
+                    per.name IS NULL 
+                    OR si.posting_date < pe.posting_date
                   )
               AND (%(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s)
-    """, {"date": date, "cost_center": cost_center}, as_dict=True)
+    """, {"date": date,  "company": company,"cost_center": cost_center}, as_dict=True)
 
 
-def get_supplier_payments(date, cost_center):
+def get_supplier_payments(date, company,cost_center):
     return frappe.db.sql("""
         SELECT
             'Payment Entry' AS document,
@@ -335,50 +418,70 @@ def get_supplier_payments(date, cost_center):
             pe.paid_amount AS amount
         FROM `tabPayment Entry` pe
         LEFT JOIN `tabPayment Entry Reference` per
-            ON per.parent=pe.name
-        WHERE pe.docstatus=1
-              AND pe.posting_date=%(date)s
-              AND pe.party_type='Supplier'
-              AND per.name IS NULL
+            ON per.parent = pe.name
+            AND per.reference_doctype = 'Purchase Invoice'
+        LEFT JOIN `tabPurchase Invoice` pi
+            ON pi.name = per.reference_name
+        WHERE pe.docstatus = 1
+              AND pe.posting_date = %(date)s
+              AND pe.party_type = 'Supplier'
+              AND (%(company)s IS NULL OR pe.company = %(company)s)
+              AND (
+                    per.name IS NULL 
+                    OR pi.posting_date < pe.posting_date
+                  )
               AND (%(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s)
-    """, {"date": date, "cost_center": cost_center}, as_dict=True)
+    """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
 
 
-def get_journal_entries(date, report_type=None, cost_center=None):
-    conditions = ""
+def get_journal_entries(date, report_type=None, company=None, cost_center=None):
+    if report_type in ("Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments"):
+        if report_type == "Bank Receipts":
+            conditions = "acc.account_type='Bank' AND jea.debit>0"
+        elif report_type == "Bank Payments":
+            conditions = "acc.account_type='Bank' AND jea.credit>0"
+        elif report_type == "Cash Receipts":
+            conditions = "acc.account_type='Cash' AND jea.debit>0"
+        elif report_type == "Cash Payments":
+            conditions = "acc.account_type='Cash' AND jea.credit>0"
 
-    if report_type == "Bank Receipts":
-        conditions = "acc.account_type='Bank' AND jea.debit>0"
+        return frappe.db.sql(f"""
+            SELECT
+                'Journal Entry' AS document,
+                je.name AS id,
+                'Posted' AS status,
+                (jea.debit + jea.credit) AS invoice_total,
+                CASE WHEN jea.debit>0 THEN jea.debit ELSE jea.credit END AS amount
+            FROM `tabJournal Entry` je
+            INNER JOIN `tabJournal Entry Account` jea
+                ON jea.parent=je.name
+            INNER JOIN `tabAccount` acc
+                ON acc.name=jea.account
+            WHERE je.docstatus=1
+                  AND je.posting_date=%(date)s
+                  AND {conditions}
+                  AND (%(company)s IS NULL OR je.company = %(company)s)
+                  AND (%(cost_center)s IS NULL OR jea.cost_center = %(cost_center)s)
+        """, {"date": date,"company": company,"cost_center": cost_center}, as_dict=True)
 
-    elif report_type == "Bank Payments":
-        conditions = "acc.account_type='Bank' AND jea.credit>0"
-
-    elif report_type == "Cash Receipts":
-        conditions = "acc.account_type='Cash' AND jea.debit>0"
-
-    elif report_type == "Cash Payments":
-        conditions = "acc.account_type='Cash' AND jea.credit>0"
-
-    else:  # Journal Entry (Only Non Bank/Cash)
-        conditions = """
-            acc.account_type NOT IN ('Bank','Cash')
-            AND (jea.debit > 0 OR jea.credit > 0)
-        """
-
-    return frappe.db.sql(f"""
-        SELECT
-            'Journal Entry' AS document,
-            je.name AS id,
-            'Posted' AS status,
-            (jea.debit + jea.credit) AS invoice_total,
-            CASE WHEN jea.debit>0 THEN jea.debit ELSE jea.credit END AS amount
-        FROM `tabJournal Entry` je
-        INNER JOIN `tabJournal Entry Account` jea
-            ON jea.parent=je.name
-        INNER JOIN `tabAccount` acc
-            ON acc.name=jea.account
-        WHERE je.docstatus=1
-              AND je.posting_date=%(date)s
-              AND {conditions}
-              AND (%(cost_center)s IS NULL OR jea.cost_center = %(cost_center)s)
-    """, {"date": date, "cost_center": cost_center}, as_dict=True) 
+    else:
+        # Other Journal Entries → Only non-Bank/non-Cash entries entirely
+        return frappe.db.sql("""
+            SELECT
+                'Journal Entry' AS document,
+                je.name AS id,
+                'Posted' AS status,
+                SUM(jea.debit + jea.credit) AS invoice_total,
+                SUM(CASE WHEN jea.debit>0 THEN jea.debit ELSE jea.credit END) AS amount
+            FROM `tabJournal Entry` je
+            INNER JOIN `tabJournal Entry Account` jea
+                ON jea.parent = je.name
+            INNER JOIN `tabAccount` acc
+                ON acc.name = jea.account
+            WHERE je.docstatus = 1
+                  AND je.posting_date = %(date)s
+                  AND (%(company)s IS NULL OR je.company = %(company)s)
+                  AND (%(cost_center)s IS NULL OR jea.cost_center = %(cost_center)s)
+            GROUP BY je.name
+            HAVING SUM(CASE WHEN acc.account_type IN ('Bank','Cash') THEN 1 ELSE 0 END) = 0
+        """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
