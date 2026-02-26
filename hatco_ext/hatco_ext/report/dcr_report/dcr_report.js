@@ -1,3 +1,4 @@
+
 // Copyright (c) 2026, Aravind R and contributors
 // For license information, please see license.txt
 
@@ -19,27 +20,46 @@ frappe.query_reports["DCR Report"] = {
             "reqd": 0 
         },
         {
+            "fieldname": "company",
+            "label": "Company",
+            "fieldtype": "Link",
+            "options": "Company",
+            "reqd": 0
+        },
+        {
             "fieldname": "cost_center",
             "label": "Cost Center",
             "fieldtype": "Link",
-            "options": "Cost Center"
-        }
+            "options": "Cost Center",
+            "get_query": function() {
+             var company = frappe.query_report.get_filter_value("company");
+             if (company) {
+                 return {
+                     "filters": {
+                         "company": company
+                     }
+                 };
+             } else {
+                 return {};
+             }
+}
+       }
     ],
-    
+
     // Types into a clickable link
 
     "formatter": function(value, row, column, data, default_formatter) {
         value = default_formatter(value, row, column, data);
-        
+
         if (column.fieldname === "type" && data && data.voucher_type && data.voucher_no) {
 
             const doctype = data.voucher_type;
             const docname = data.voucher_no;
-            
+
             const regex = new RegExp(`(${docname})`, 'g');
             value = value.replace(regex, `<a href="/app/${doctype.toLowerCase().replace(/\s+/g, '-')}/${docname}" style="color: #000000; text-decoration: underline;">${docname}</a>`);
         }
-        
+
         return value;
     }
 };
