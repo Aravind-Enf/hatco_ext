@@ -49,15 +49,15 @@ frappe.query_reports["DCR Report"] = {
     // Types into a clickable link
 
     "formatter": function(value, row, column, data, default_formatter) {
+
         value = default_formatter(value, row, column, data);
 
         if (column.fieldname === "type" && data && data.voucher_type && data.voucher_no) {
 
-            const doctype = data.voucher_type;
-            const docname = data.voucher_no;
-
-            const regex = new RegExp(`(${docname})`, 'g');
-            value = value.replace(regex, `<a href="/app/${doctype.toLowerCase().replace(/\s+/g, '-')}/${docname}" style="color: #000000; text-decoration: underline;">${docname}</a>`);
+            return `<a href="/app/${frappe.router.slug(data.voucher_type)}/${data.voucher_no}"
+                    style="color:#000000; text-decoration:underline;">
+                        ${value}
+                    </a>`;
         }
 
         return value;
