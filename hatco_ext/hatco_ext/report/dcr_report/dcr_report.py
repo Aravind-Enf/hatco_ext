@@ -78,6 +78,7 @@ def get_data(filters):
         "Cash Receipts",
         "Cash Payments",
         "Journal Entry",
+        "Internal Transfer",
     ]
 
     # If type filter is selected, show only that type  
@@ -107,6 +108,8 @@ def get_data(filters):
             paid_rows = get_customer_receipts(date, company,cost_center)
         elif t == "Supplier Payments":
             paid_rows = get_supplier_payments(date, company,cost_center)
+        elif t == "Internal Transfer":
+            paid_rows = get_internal_transfers(date, company, cost_center)
 
 
         elif t in ["Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments", "Journal Entry"]:
@@ -320,23 +323,31 @@ def get_sales_returns(date,company,cost_center):
     # Fetch sales returns for the exact filter date only
     data = frappe.db.sql("""
         SELECT
-            'Sales Return' AS document,
-            si.name AS id,
+            'Sales Invoice' AS voucher_type,
+            si.name AS voucher_no,
             CASE
-                WHEN si.grand_total - IFNULL(SUM(
+                WHEN si.grand_total - COALESCE(SUM(
                     CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
-                         THEN per.allocated_amount ELSE 0 END
+                        THEN per.allocated_amount ELSE 0 END
                 ),0) = 0 THEN 'Paid'
-                WHEN SUM(
+                WHEN COALESCE(SUM(
                     CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
-                         THEN per.allocated_amount ELSE 0 END
-                ) = 0 THEN 'Unpaid'
+                        THEN per.allocated_amount ELSE 0 END
+                ),0) = 0 THEN 'Unpaid'
                 ELSE 'Partially Paid'
             END AS status,
             si.grand_total AS invoice_total,
-            IFNULL(SUM(
-                CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 THEN per.allocated_amount ELSE 0 END
-            ),0) AS amount,
+            CASE
+                WHEN COALESCE(SUM(
+                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
+                        THEN per.allocated_amount ELSE 0 END
+                ),0) > 0
+                THEN COALESCE(SUM(
+                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
+                        THEN per.allocated_amount ELSE 0 END
+                ),0)
+                ELSE si.grand_total
+            END AS amount,
             COUNT(si.name) OVER () AS total_count
         FROM `tabSales Invoice` si
         LEFT JOIN `tabPayment Entry Reference` per
@@ -344,10 +355,10 @@ def get_sales_returns(date,company,cost_center):
         LEFT JOIN `tabPayment Entry` pe
             ON pe.name = per.parent
         WHERE si.docstatus=1 
-              AND si.is_return=1
-              AND si.posting_date = %(date)s
-              AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
-              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR si.cost_center = %(cost_center)s )
+            AND si.is_return=1
+            AND si.posting_date = %(date)s
+            AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
+            AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR si.cost_center = %(cost_center)s )
         GROUP BY si.name, si.grand_total
         ORDER BY si.posting_date ASC
     """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
@@ -411,7 +422,7 @@ def get_customer_receipts(date, company=None, cost_center=None):
     }, as_dict=True)
 
 
-def get_supplier_payments(date, company,cost_center):
+def get_supplier_payments(date, company, cost_center):
     return frappe.db.sql("""
         SELECT
             'Payment Entry' AS document,
@@ -434,8 +445,13 @@ def get_supplier_payments(date, company,cost_center):
                     OR pi.posting_date < pe.posting_date
                   )
               AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pe.cost_center = %(cost_center)s )
-    """, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
-
+        GROUP BY pe.name, pe.paid_amount
+        ORDER BY pe.posting_date ASC
+    """, {
+        "date": date,
+        "company": company,
+        "cost_center": cost_center
+    }, as_dict=True)
 
 def get_journal_entries(date, report_type=None, company=None, cost_center=None):
     if report_type in ("Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments"):
@@ -488,3 +504,36 @@ def get_journal_entries(date, report_type=None, company=None, cost_center=None):
             GROUP BY je.name
             HAVING SUM(CASE WHEN acc.account_type IN ('Bank','Cash') THEN 1 ELSE 0 END) = 0
         """, {"date": date, "company": company,"cost_center": cost_center}, as_dict=True)
+
+
+def get_internal_transfers(date, company=None, cost_center=None):
+    """
+    Fetch Internal Transfer Payment Entries:
+    Only include Bank → Bank and Cash → Cash
+    """
+    return frappe.db.sql("""
+        SELECT
+            'Payment Entry' AS document,
+            pe.name AS id,
+            CASE 
+                WHEN acc_from.account_type='Bank' AND acc_to.account_type='Bank' THEN 'Bank → Bank'
+                WHEN acc_from.account_type='Cash' AND acc_to.account_type='Cash' THEN 'Cash → Cash'
+            END AS status,
+            pe.paid_amount AS amount,
+            pe.paid_amount AS invoice_total,
+            'Payment Entry' AS voucher_type,
+            pe.name AS voucher_no
+        FROM `tabPayment Entry` pe
+        INNER JOIN `tabAccount` acc_from ON acc_from.name = pe.paid_from
+        INNER JOIN `tabAccount` acc_to ON acc_to.name = pe.paid_to
+        WHERE pe.docstatus = 1
+              AND pe.payment_type = 'Internal Transfer'
+              AND pe.posting_date = %(date)s
+              AND ( %(company)s IS NULL OR pe.company = %(company)s )
+              AND ( %(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s )
+              AND (
+                  (acc_from.account_type='Bank' AND acc_to.account_type='Bank')
+                  OR
+                  (acc_from.account_type='Cash' AND acc_to.account_type='Cash')
+              )
+    """, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
