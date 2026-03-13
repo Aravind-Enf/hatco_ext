@@ -141,122 +141,118 @@ def get_data(filters):
     return result
 
 
-def fetch_sales_invoices(t, date,company, cost_center):
+def fetch_sales_invoices(t, date, company, cost_center):
 
     if t == "Cash Sales":
 
-        amount_field = """
-            IFNULL(
-                CASE 
-                    WHEN si.is_pos = 1 THEN SUM(sip.amount)
-                    ELSE SUM(per.allocated_amount)
-                END
-            ,0)
-        """
-
-        date_condition = """
-            AND si.posting_date = %(date)s
+        condition = """
             AND (
                 (
-                    si.is_pos = 0
-                    AND pe.posting_date <= si.posting_date
-                    AND pe.mode_of_payment IN (
-                        SELECT name FROM `tabMode of Payment`
-                        WHERE type = 'Cash'
+                    si.is_pos = 1
+                    AND EXISTS (
+                        SELECT 1
+                        FROM `tabSales Invoice Payment` sip
+                        WHERE sip.parent = si.name
+                        AND sip.mode_of_payment IN (
+                            SELECT name FROM `tabMode of Payment`
+                            WHERE type = 'Cash'
+                        )
                     )
                 )
                 OR
                 (
-                    si.is_pos = 1
-                    AND sip.mode_of_payment IN (
-                        SELECT name FROM `tabMode of Payment`
-                        WHERE type = 'Cash'
+                    si.is_pos = 0
+                    AND EXISTS (
+                        SELECT 1
+                        FROM `tabPayment Entry Reference` per
+                        INNER JOIN `tabPayment Entry` pe
+                            ON pe.name = per.parent
+                        WHERE per.reference_name = si.name
+                        AND per.reference_doctype = 'Sales Invoice'
+                        AND pe.docstatus = 1
+                        AND pe.posting_date = %(date)s
+                        AND pe.mode_of_payment IN (
+                            SELECT name FROM `tabMode of Payment`
+                            WHERE type = 'Cash'
+                        )
                     )
                 )
             )
         """
-
-        join_type = "LEFT"
 
     elif t == "Card/Bank Sales":
 
-        amount_field = """
-            IFNULL(
-                CASE 
-                    WHEN si.is_pos = 1 THEN SUM(sip.amount)
-                    ELSE SUM(per.allocated_amount)
-                END
-            ,0)
-        """
-
-        date_condition = """
-            AND si.posting_date = %(date)s
+        condition = """
             AND (
                 (
-                    si.is_pos = 0
-                    AND pe.posting_date = %(date)s
-                    AND pe.mode_of_payment IN (
-                        SELECT name FROM `tabMode of Payment`
-                        WHERE type IN ('Bank','Card')
+                    si.is_pos = 1
+                    AND EXISTS (
+                        SELECT 1
+                        FROM `tabSales Invoice Payment` sip
+                        WHERE sip.parent = si.name
+                        AND sip.mode_of_payment IN (
+                            SELECT name FROM `tabMode of Payment`
+                            WHERE type IN ('Bank','Card')
+                        )
                     )
                 )
                 OR
                 (
-                    si.is_pos = 1
-                    AND sip.mode_of_payment IN (
-                        SELECT name FROM `tabMode of Payment`
-                        WHERE type IN ('Bank','Card')
+                    si.is_pos = 0
+                    AND EXISTS (
+                        SELECT 1
+                        FROM `tabPayment Entry Reference` per
+                        INNER JOIN `tabPayment Entry` pe
+                            ON pe.name = per.parent
+                        WHERE per.reference_name = si.name
+                        AND per.reference_doctype = 'Sales Invoice'
+                        AND pe.docstatus = 1
+                        AND pe.posting_date = %(date)s
+                        AND pe.mode_of_payment IN (
+                            SELECT name FROM `tabMode of Payment`
+                            WHERE type IN ('Bank','Card')
+                        )
                     )
                 )
             )
         """
 
-        join_type = "LEFT"
-
     else:  # Credit Sales
-        amount_field = "si.grand_total"
-        date_condition = """
-            AND si.posting_date = %(date)s
+
+        condition = """
             AND si.is_pos = 0
             AND NOT EXISTS (
                 SELECT 1
-                FROM `tabPayment Entry Reference` per2
-                INNER JOIN `tabPayment Entry` pe2
-                    ON pe2.name = per2.parent
-                WHERE per2.reference_name = si.name
-                    AND per2.reference_doctype = 'Sales Invoice'
-                    AND pe2.docstatus = 1
-                    
+                FROM `tabPayment Entry Reference` per
+                INNER JOIN `tabPayment Entry` pe
+                    ON pe.name = per.parent
+                WHERE per.reference_name = si.name
+                AND per.reference_doctype = 'Sales Invoice'
+                AND pe.docstatus = 1
+                AND pe.posting_date = %(date)s
             )
         """
 
-        join_type = "LEFT"
-
-
     query = f"""
-        SELECT si.name AS voucher_no,
-               {amount_field} AS amount,
-               'Sales Invoice' AS voucher_type
+        SELECT
+            si.name AS voucher_no,
+            si.grand_total AS amount,
+            'Sales Invoice' AS voucher_type
         FROM `tabSales Invoice` si
-        {join_type} JOIN `tabPayment Entry Reference` per
-            ON per.reference_name = si.name
-            AND per.reference_doctype='Sales Invoice'
-        {join_type} JOIN `tabPayment Entry` pe
-            ON pe.name = per.parent
-            AND pe.docstatus=1
-            
-         LEFT JOIN `tabSales Invoice Payment` sip
-            ON sip.parent = si.name
-        WHERE si.docstatus=1
-              AND si.is_return=0
-              {date_condition}
-              AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
-              AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR si.cost_center = %(cost_center)s )
-        GROUP BY si.name
+        WHERE
+            si.docstatus = 1
+            AND si.is_return = 0
+            AND si.posting_date = %(date)s
+            {condition}
+            AND (%(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s)
+            AND (%(cost_center)s IS NULL OR %(cost_center)s = '' OR si.cost_center = %(cost_center)s)
     """
 
-    return frappe.db.sql(query, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
-
+    return frappe.db.sql(
+        query,
+        {"date": date, "company": company, "cost_center": cost_center},
+        as_dict=True
+    )
 
 def fetch_purchase_invoices(t, date,company, cost_center):
     """Fetch Purchase Invoice rows per type & MoP"""
