@@ -226,7 +226,7 @@ def fetch_sales_invoices(t, date,company, cost_center):
                 WHERE per2.reference_name = si.name
                     AND per2.reference_doctype = 'Sales Invoice'
                     AND pe2.docstatus = 1
-                    
+                    AND pe2.posting_date = si.posting_date
             )
         """
 
