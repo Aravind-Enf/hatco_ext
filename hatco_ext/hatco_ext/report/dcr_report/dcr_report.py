@@ -507,33 +507,22 @@ def get_journal_entries(date, report_type=None, company=None, cost_center=None):
 
 
 def get_internal_transfers(date, company=None, cost_center=None):
-    """
-    Fetch Internal Transfer Payment Entries:
-    Only include Bank → Bank and Cash → Cash
-    """
+
     return frappe.db.sql("""
         SELECT
-            'Payment Entry' AS document,
-            pe.name AS id,
-            CASE 
-                WHEN acc_from.account_type='Bank' AND acc_to.account_type='Bank' THEN 'Bank → Bank'
-                WHEN acc_from.account_type='Cash' AND acc_to.account_type='Cash' THEN 'Cash → Cash'
-            END AS status,
-            pe.paid_amount AS amount,
-            pe.paid_amount AS invoice_total,
             'Payment Entry' AS voucher_type,
-            pe.name AS voucher_no
+            pe.name AS voucher_no,
+            'Internal Transfer' AS status,
+            pe.paid_amount AS amount,
+            pe.paid_amount AS invoice_total
         FROM `tabPayment Entry` pe
-        INNER JOIN `tabAccount` acc_from ON acc_from.name = pe.paid_from
-        INNER JOIN `tabAccount` acc_to ON acc_to.name = pe.paid_to
         WHERE pe.docstatus = 1
               AND pe.payment_type = 'Internal Transfer'
               AND pe.posting_date = %(date)s
               AND ( %(company)s IS NULL OR pe.company = %(company)s )
               AND ( %(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s )
-              AND (
-                  (acc_from.account_type='Bank' AND acc_to.account_type='Bank')
-                  OR
-                  (acc_from.account_type='Cash' AND acc_to.account_type='Cash')
-              )
-    """, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
+    """, {
+        "date": date,
+        "company": company,
+        "cost_center": cost_center
+    }, as_dict=True)
