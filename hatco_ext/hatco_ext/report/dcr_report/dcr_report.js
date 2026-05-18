@@ -10,14 +10,14 @@ frappe.query_reports["DCR Report"] = {
             "label": "Date",
             "fieldtype": "Date",
             "default": frappe.datetime.get_today(),
-            "reqd": 0 
+            "reqd": 0
         },
         {
             "fieldname": "type",
             "label": "Type",
             "fieldtype": "Select",
-            "options": "\nCash Sales\nCard Sales\nCredit Sales\nCash Purchases\nCard Purchases\nCredit Purchases\nSales Return\nPurchase Return\nCustomer Receipts\nSupplier Payments\nBank Receipts\nBank Payments\nCash Receipts\nCash Payments\nJournal Entry\nInternal Transfer",
-            "reqd": 0 
+            "options": "\nCash Sales\nCard Sales\nCredit Sales\nCash Purchases\nCard Purchases\nCredit Purchases\nSales Return\nPurchase Return\nCustomer Receipts (Cash)\nCustomer Receipts\nSupplier Payments (Cash)\nSupplier Payments\nBank Receipts\nBank Payments\nCash Receipts\nCash Payments\nJournal Entry\nInternal Transfer\nCash Balance",
+            "reqd": 0
         },
         {
             "fieldname": "company",
@@ -42,8 +42,8 @@ frappe.query_reports["DCR Report"] = {
              } else {
                  return {};
              }
-}
-       }
+    }
+           }
     ],
 
     // Types into a clickable link

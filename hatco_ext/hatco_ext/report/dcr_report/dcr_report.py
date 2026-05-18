@@ -52,7 +52,7 @@ def get_columns():
 
 def get_data(filters):
     filters = filters or {}
-    
+
 
     filters["company"] = filters.get("company") if filters.get("company") else None
     filters["cost_center"] = filters.get("cost_center") if filters.get("cost_center") else None
@@ -60,7 +60,7 @@ def get_data(filters):
     date = filters.get("date")
     type_filter = filters.get("type")
     cost_center = filters.get("cost_center")
-    company = filters.get("company")  
+    company = filters.get("company")
 
     types = [
         "Cash Sales",
@@ -71,7 +71,9 @@ def get_data(filters):
         "Credit Purchases",
         "Sales Return",
         "Purchase Return",
+        "Customer Receipts (Cash)",
         "Customer Receipts",
+        "Supplier Payments (Cash)",
         "Supplier Payments",
         "Bank Receipts",
         "Bank Payments",
@@ -79,13 +81,15 @@ def get_data(filters):
         "Cash Payments",
         "Journal Entry",
         "Internal Transfer",
+        "Cash Balance",
     ]
 
-    # If type filter is selected, show only that type  
+    # If type filter is selected, show only that type
     if type_filter:
         types = [type_filter]
 
     result = []
+    totals_map = {}
 
     for t in types:
         total = 0
@@ -104,13 +108,19 @@ def get_data(filters):
         elif t == "Purchase Return":
             paid_rows = get_purchase_returns(date,company, cost_center)
 
+        elif t == "Customer Receipts (Cash)":
+            paid_rows = get_customer_receipts(date, company, cost_center, cash_only=True)
         elif t == "Customer Receipts":
-            paid_rows = get_customer_receipts(date, company,cost_center)
+            paid_rows = get_customer_receipts(date, company, cost_center, cash_only=False)
+        elif t == "Supplier Payments (Cash)":
+            paid_rows = get_supplier_payments(date, company, cost_center, cash_only=True)
         elif t == "Supplier Payments":
-            paid_rows = get_supplier_payments(date, company,cost_center)
+            paid_rows = get_supplier_payments(date, company, cost_center, cash_only=False)
         elif t == "Internal Transfer":
             paid_rows = get_internal_transfers(date, company, cost_center)
 
+        elif t == "Cash Balance":
+            continue
 
         elif t in ["Bank Receipts", "Bank Payments", "Cash Receipts", "Cash Payments", "Journal Entry"]:
             paid_rows = get_journal_entries(date, t, company,cost_center)
@@ -119,24 +129,47 @@ def get_data(filters):
         total = sum(r.get("amount", 0) or 0 for r in paid_rows)
         count = len(paid_rows)
 
-        # Add total row
-        result.append({
-            "type": t,
-            "total": total,
-            "invoice_count": count,
-            "indent": 0
-        })
+        if t != "Cash Balance":
+            totals_map[t] = total
 
-        # Add individual invoice/payment rows
-        for row in paid_rows:
             result.append({
-                "type": f"{row.get('voucher_type', row.get('document',''))} {row.get('voucher_no', row.get('id',''))}",
-                "total": row.get("amount", 0),
-                "invoice_count": "",
-                "voucher_type": row.get("voucher_type", row.get("document","")),
-                "voucher_no": row.get("voucher_no", row.get("id","")),
-                "indent": 1
+                "type": t,
+                "total": total,
+                "invoice_count": count,
+                "indent": 0
             })
+
+            for row in paid_rows:
+                result.append({
+                    "type": f"{row.get('voucher_type', row.get('document',''))} {row.get('voucher_no', row.get('id',''))}",
+                    "total": row.get("amount", 0),
+                    "invoice_count": "",
+                    "voucher_type": row.get("voucher_type", row.get("document","")),
+                    "voucher_no": row.get("voucher_no", row.get("id","")),
+                    "indent": 1
+                })
+
+    # Cash Balance: Cash Sales - Sales Return(cash) - Cash Purchases
+    #   + Customer Receipts(cash) - Supplier Payments(cash)
+    #   + Cash Receipts - Cash Payments +/- Internal Transfer(cash)
+    cash_balance = (
+        totals_map.get("Cash Sales", 0)
+        - get_cash_sales_return_total(date, company, cost_center)
+        - totals_map.get("Cash Purchases", 0)
+        + totals_map.get("Customer Receipts (Cash)", 0)
+        - totals_map.get("Supplier Payments (Cash)", 0)
+        + totals_map.get("Cash Receipts", 0)
+        - totals_map.get("Cash Payments", 0)
+        + get_internal_transfer_cash_net(date, company, cost_center)
+    )
+
+    result.append({
+        "type": "Cash Balance",
+        "total": cash_balance,
+        "invoice_count": "",
+        "indent": 0,
+        "is_cash_balance": 1
+    })
 
     return result
 
@@ -147,7 +180,7 @@ def fetch_sales_invoices(t, date,company, cost_center):
 
         amount_field = """
             IFNULL(
-                CASE 
+                CASE
                     WHEN si.is_pos = 1 THEN SUM(sip.amount)
                     ELSE SUM(per.allocated_amount)
                 END
@@ -182,7 +215,7 @@ def fetch_sales_invoices(t, date,company, cost_center):
 
         amount_field = """
             IFNULL(
-                CASE 
+                CASE
                     WHEN si.is_pos = 1 THEN SUM(sip.amount)
                     ELSE SUM(per.allocated_amount)
                 END
@@ -243,11 +276,11 @@ def fetch_sales_invoices(t, date,company, cost_center):
             AND per.reference_doctype='Sales Invoice'
         {join_type} JOIN `tabPayment Entry` pe
             ON pe.name = per.parent
-            AND pe.docstatus=1
-            
+
+
          LEFT JOIN `tabSales Invoice Payment` sip
             ON sip.parent = si.name
-        WHERE si.docstatus=1
+        WHERE si.docstatus IN (0,1)
               AND si.is_return=0
               {date_condition}
               AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
@@ -307,8 +340,8 @@ def fetch_purchase_invoices(t, date,company, cost_center):
         LEFT JOIN `tabPayment Entry Reference` per
             ON per.reference_name = pi.name AND per.reference_doctype='Purchase Invoice'
         LEFT JOIN `tabPayment Entry` pe
-            ON pe.name = per.parent AND pe.docstatus=1
-        WHERE pi.docstatus=1
+            ON pe.name = per.parent
+        WHERE pi.docstatus IN (0,1)
               AND pi.is_return=0
               {date_condition}
               AND ( %(company)s IS NULL OR %(company)s = '' OR pi.company = %(company)s )
@@ -327,11 +360,11 @@ def get_sales_returns(date,company,cost_center):
             si.name AS voucher_no,
             CASE
                 WHEN si.grand_total - COALESCE(SUM(
-                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
+                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1
                         THEN per.allocated_amount ELSE 0 END
                 ),0) = 0 THEN 'Paid'
                 WHEN COALESCE(SUM(
-                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
+                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1
                         THEN per.allocated_amount ELSE 0 END
                 ),0) = 0 THEN 'Unpaid'
                 ELSE 'Partially Paid'
@@ -339,11 +372,11 @@ def get_sales_returns(date,company,cost_center):
             si.grand_total AS invoice_total,
             CASE
                 WHEN COALESCE(SUM(
-                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
+                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1
                         THEN per.allocated_amount ELSE 0 END
                 ),0) > 0
                 THEN COALESCE(SUM(
-                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1 
+                    CASE WHEN pe.posting_date = %(date)s AND pe.docstatus=1
                         THEN per.allocated_amount ELSE 0 END
                 ),0)
                 ELSE si.grand_total
@@ -354,7 +387,7 @@ def get_sales_returns(date,company,cost_center):
             ON per.reference_name=si.name AND per.reference_doctype='Sales Invoice'
         LEFT JOIN `tabPayment Entry` pe
             ON pe.name = per.parent
-        WHERE si.docstatus=1 
+        WHERE si.docstatus IN (0,1)
             AND si.is_return=1
             AND si.posting_date = %(date)s
             AND ( %(company)s IS NULL OR %(company)s = '' OR si.company = %(company)s )
@@ -367,7 +400,7 @@ def get_sales_returns(date,company,cost_center):
 
 
 def get_purchase_returns(date,company,cost_center):
-    # Fetch purchase returns for the exact invoice posting date only 
+    # Fetch purchase returns for the exact invoice posting date only
     return frappe.db.sql("""
         SELECT
             'Purchase Return' AS document,
@@ -386,7 +419,7 @@ def get_purchase_returns(date,company,cost_center):
             ON per.reference_name=pi.name AND per.reference_doctype='Purchase Invoice'
         LEFT JOIN `tabPayment Entry` pe
             ON pe.name = per.parent
-        WHERE pi.docstatus=1 AND pi.is_return=1
+        WHERE pi.docstatus IN (0,1) AND pi.is_return=1
               AND pi.posting_date = %(date)s
               AND ( %(company)s IS NULL OR %(company)s = '' OR pi.company = %(company)s )
               AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pi.cost_center = %(cost_center)s )
@@ -395,8 +428,18 @@ def get_purchase_returns(date,company,cost_center):
     """, {"date": date,"company": company, "cost_center": cost_center}, as_dict=True)
 
 
-def get_customer_receipts(date, company=None, cost_center=None):
-    return frappe.db.sql("""
+def get_customer_receipts(date, company=None, cost_center=None, cash_only=None):
+    cash_condition = ""
+    if cash_only is True:
+        cash_condition = """AND pe.mode_of_payment IN (
+                SELECT name FROM `tabMode of Payment` WHERE type = 'Cash'
+            )"""
+    elif cash_only is False:
+        cash_condition = """AND pe.mode_of_payment NOT IN (
+                SELECT name FROM `tabMode of Payment` WHERE type = 'Cash'
+            )"""
+
+    return frappe.db.sql(f"""
         SELECT
             'Payment Entry' AS document,
             pe.name AS id,
@@ -409,10 +452,11 @@ def get_customer_receipts(date, company=None, cost_center=None):
             AND per.reference_doctype = 'Sales Invoice'
         INNER JOIN `tabSales Invoice` si
             ON si.name = per.reference_name
-        WHERE pe.docstatus = 1
+        WHERE pe.docstatus IN (0,1)
               AND pe.posting_date = %(date)s
               AND pe.party_type = 'Customer'
-               AND pe.posting_date != si.posting_date
+              AND pe.posting_date != si.posting_date
+              {cash_condition}
               AND ( %(company)s IS NULL OR %(company)s = '' OR pe.company = %(company)s )
               AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pe.cost_center = %(cost_center)s )
     """, {
@@ -422,8 +466,18 @@ def get_customer_receipts(date, company=None, cost_center=None):
     }, as_dict=True)
 
 
-def get_supplier_payments(date, company, cost_center):
-    return frappe.db.sql("""
+def get_supplier_payments(date, company, cost_center, cash_only=None):
+    cash_condition = ""
+    if cash_only is True:
+        cash_condition = """AND pe.mode_of_payment IN (
+                SELECT name FROM `tabMode of Payment` WHERE type = 'Cash'
+            )"""
+    elif cash_only is False:
+        cash_condition = """AND pe.mode_of_payment NOT IN (
+                SELECT name FROM `tabMode of Payment` WHERE type = 'Cash'
+            )"""
+
+    return frappe.db.sql(f"""
         SELECT
             'Payment Entry' AS document,
             pe.name AS id,
@@ -436,12 +490,13 @@ def get_supplier_payments(date, company, cost_center):
             AND per.reference_doctype = 'Purchase Invoice'
         LEFT JOIN `tabPurchase Invoice` pi
             ON pi.name = per.reference_name
-        WHERE pe.docstatus = 1
+        WHERE pe.docstatus IN (0,1)
               AND pe.posting_date = %(date)s
               AND pe.party_type = 'Supplier'
+              {cash_condition}
               AND ( %(company)s IS NULL OR %(company)s = '' OR pe.company = %(company)s )
               AND (
-                    per.name IS NULL 
+                    per.name IS NULL
                     OR pi.posting_date < pe.posting_date
                   )
               AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pe.cost_center = %(cost_center)s )
@@ -476,7 +531,7 @@ def get_journal_entries(date, report_type=None, company=None, cost_center=None):
                 ON jea.parent=je.name
             INNER JOIN `tabAccount` acc
                 ON acc.name=jea.account
-            WHERE je.docstatus=1
+            WHERE je.docstatus IN (0,1)
                   AND je.posting_date=%(date)s
                   AND {conditions}
                   AND (%(company)s IS NULL OR je.company = %(company)s)
@@ -497,7 +552,7 @@ def get_journal_entries(date, report_type=None, company=None, cost_center=None):
                 ON jea.parent = je.name
             INNER JOIN `tabAccount` acc
                 ON acc.name = jea.account
-            WHERE je.docstatus = 1
+            WHERE je.docstatus IN (0,1)
                   AND je.posting_date = %(date)s
                   AND (%(company)s IS NULL OR je.company = %(company)s)
                   AND (%(cost_center)s IS NULL OR jea.cost_center = %(cost_center)s)
@@ -516,7 +571,7 @@ def get_internal_transfers(date, company=None, cost_center=None):
             pe.paid_amount AS amount,
             pe.paid_amount AS invoice_total
         FROM `tabPayment Entry` pe
-        WHERE pe.docstatus = 1
+        WHERE pe.docstatus IN (0,1)
               AND pe.payment_type = 'Internal Transfer'
               AND pe.posting_date = %(date)s
               AND ( %(company)s IS NULL OR pe.company = %(company)s )
@@ -526,3 +581,46 @@ def get_internal_transfers(date, company=None, cost_center=None):
         "company": company,
         "cost_center": cost_center
     }, as_dict=True)
+
+
+def get_cash_sales_return_total(date, company=None, cost_center=None):
+    """Sales returns refunded via cash - from existing Payment Entries"""
+    result = frappe.db.sql("""
+        SELECT IFNULL(SUM(per.allocated_amount), 0) AS total
+        FROM `tabPayment Entry Reference` per
+        JOIN `tabPayment Entry` pe ON pe.name = per.parent
+        JOIN `tabSales Invoice` si ON si.name = per.reference_name
+        WHERE pe.docstatus IN (0,1)
+          AND per.reference_doctype = 'Sales Invoice'
+          AND si.is_return = 1
+          AND si.posting_date = %(date)s
+          AND pe.posting_date = %(date)s
+          AND pe.mode_of_payment IN (
+              SELECT name FROM `tabMode of Payment` WHERE type = 'Cash'
+          )
+          AND ( %(company)s IS NULL OR %(company)s = '' OR pe.company = %(company)s )
+          AND ( %(cost_center)s IS NULL OR %(cost_center)s = '' OR pe.cost_center = %(cost_center)s )
+    """, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
+    return result[0].get("total", 0) if result else 0
+
+
+def get_internal_transfer_cash_net(date, company=None, cost_center=None):
+    """Net cash effect of internal transfers: +inflow, -outflow"""
+    result = frappe.db.sql("""
+        SELECT IFNULL(SUM(
+            CASE
+                WHEN pa_from.account_type = 'Cash' THEN -pe.paid_amount
+                WHEN pa_to.account_type = 'Cash' THEN pe.paid_amount
+                ELSE 0
+            END
+        ), 0) AS net
+        FROM `tabPayment Entry` pe
+        LEFT JOIN `tabAccount` pa_from ON pa_from.name = pe.paid_from
+        LEFT JOIN `tabAccount` pa_to ON pa_to.name = pe.paid_to
+        WHERE pe.docstatus IN (0,1)
+          AND pe.payment_type = 'Internal Transfer'
+          AND pe.posting_date = %(date)s
+          AND ( %(company)s IS NULL OR pe.company = %(company)s )
+          AND ( %(cost_center)s IS NULL OR pe.cost_center = %(cost_center)s )
+    """, {"date": date, "company": company, "cost_center": cost_center}, as_dict=True)
+    return result[0].get("net", 0) if result else 0
